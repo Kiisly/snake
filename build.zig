@@ -3,8 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const no_bin = b.option(bool, "no_bin", "Skip emitting binary. Use this for icremental compilation") orelse false;
-    const use_llvm = b.option(bool, "use_llvm", "Use LLVM istead of x86 backend") orelse false;
+    const no_bin = b.option(bool, "no_bin", "Skip emitting binary. Use this for incremental compilation") orelse false;
+    const use_llvm = b.option(bool, "use_llvm", "Use LLVM instead of x86 backend") orelse false;
 
     const game_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -46,6 +46,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const run_cmd = b.addRunArtifact(exe);
+    if (b.args) |args| run_cmd.addArgs(args);
     run_cmd.step.dependOn(b.getInstallStep());
 
     const run_step = b.step("run", "Run the game");

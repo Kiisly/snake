@@ -2,3 +2,4 @@
 zig-out/
 tags
 *.o
+*.swp

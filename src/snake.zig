@@ -47,7 +47,7 @@ pub export fn gameUpdateAndRender(
     memory: *GameMemory,
     input: *GameInput,
     buffer: *GameOffscreenBuffer,
-) callconv(.C) void {
+) callconv(.c) void {
 
     //@breakpoint();
     assert(@sizeOf(GameState) <= memory.permanent_storage.len);

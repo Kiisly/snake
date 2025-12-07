@@ -1,6 +1,6 @@
 const assert = @import("std").debug.assert;
 
-pub const UpdateAndRender = ?*const fn (memory: *Memory, input: *Input, buffer: *OffscreenBuffer) callconv(.C) void;
+pub const UpdateAndRender = ?*const fn (memory: *Memory, input: *Input, buffer: *OffscreenBuffer) callconv(.c) void;
 
 pub const Memory = struct {
     permanent_storage: []u8,

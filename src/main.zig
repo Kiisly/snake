@@ -3,15 +3,24 @@ comptime {
 }
 
 const std = @import("std");
+const builtin = @import("builtin");
 const print = std.debug.print;
 const assert = std.debug.assert;
 const c = @import("c.zig").c;
+const sdl_log = std.log.scoped(.sdl);
+const log = std.log.scoped(.app);
 
 const game_API = @import("game_API.zig");
 const GameMemory = game_API.Memory;
 const GameInput = game_API.Input;
 const GameOffscreenBuffer = game_API.OffscreenBuffer;
 const getButton = game_API.getButton;
+
+const target_triple: [:0]const u8 = lable: {
+    var buffer: [256]u8 = undefined;
+    var ally: std.heap.FixedBufferAllocator = .init(&buffer);
+    break :lable (builtin.target.zigTriple(ally.allocator()) catch unreachable) ++ "";
+};
 
 const PlatformOffscreenBuffer = struct {
     // NOTE: Pixels are always 32 bits wide. Memory order (little-endian): B-G-R-A
@@ -24,26 +33,29 @@ const PlatformOffscreenBuffer = struct {
 
 pub fn main() !void {
     errdefer |err| if (err == error.SdlError) {
-        std.log.debug("SDL error: {s}", .{c.SDL_GetError()});
+        sdl_log.debug("SDL error: {s}", .{c.SDL_GetError()});
     };
 
-    std.log.debug("SDL build time version: {d}.{d}.{d}", .{
+    std.log.debug("{s} {s}", .{ target_triple, @tagName(builtin.mode) });
+    const platform: [*:0]const u8 = c.SDL_GetPlatform();
+    sdl_log.debug("SDL platform: {s}", .{platform});
+    sdl_log.debug("SDL build time version: {d}.{d}.{d}", .{
         c.SDL_MAJOR_VERSION,
         c.SDL_MINOR_VERSION,
         c.SDL_MICRO_VERSION,
     });
 
-    std.log.debug("SDL build time revesion: {s}", .{c.SDL_REVISION});
+    sdl_log.debug("SDL build time revesion: {s}", .{c.SDL_REVISION});
 
     {
         const version = c.SDL_GetVersion();
-        std.log.debug("SDL runtime version: {d}.{d}.{d}", .{
+        sdl_log.debug("SDL runtime version: {d}.{d}.{d}", .{
             c.SDL_VERSIONNUM_MAJOR(version),
             c.SDL_VERSIONNUM_MINOR(version),
             c.SDL_VERSIONNUM_MICRO(version),
         });
         const revision: [*:0]const u8 = c.SDL_GetRevision();
-        std.log.debug("SDL runtime revision: {s}", .{revision});
+        sdl_log.debug("SDL runtime revision: {s}", .{revision});
     }
 
     // For programs that provide their own entry point instead of relying on SDL's main function macro magic,
@@ -51,20 +63,20 @@ pub fn main() !void {
     c.SDL_SetMainReady();
 
     if (!c.SDL_SetAppMetadata("Snake", "0.1.0", null)) {
-        std.log.debug("SDL error: {s}", .{c.SDL_GetError()});
+        sdl_log.debug("SDL error: {s}", .{c.SDL_GetError()});
     }
 
     try errify(c.SDL_Init(c.SDL_INIT_VIDEO));
     defer c.SDL_Quit();
 
-    std.log.debug("SDL video drivers: {}", .{fmtSdlDrivers(
+    sdl_log.debug("SDL video drivers: {f}", .{fmtSdlDrivers(
         c.SDL_GetCurrentVideoDriver().?,
         c.SDL_GetNumVideoDrivers(),
         c.SDL_GetVideoDriver,
     )});
 
     if (!c.SDL_SetHint(c.SDL_HINT_RENDER_VSYNC, "1")) {
-        std.log.debug("SDL error: {s}", .{c.SDL_GetError()});
+        sdl_log.debug("Unable to turn on VSYNC: {s}", .{c.SDL_GetError()});
     }
 
     const window_width = 960;
@@ -85,7 +97,7 @@ pub fn main() !void {
     defer c.SDL_DestroyWindow(window);
     defer c.SDL_DestroyRenderer(renderer);
 
-    std.log.debug("SDL render drivers: {}", .{fmtSdlDrivers(
+    sdl_log.debug("SDL render drivers: {f}", .{fmtSdlDrivers(
         c.SDL_GetRendererName(renderer).?,
         c.SDL_GetNumRenderDrivers(),
         c.SDL_GetRenderDriver,
@@ -279,8 +291,8 @@ fn handleKeyboardInput(button: *game_API.ButtonState, is_down: bool) void {
 fn getFileLastWriteTime(file_path: [:0]const u8) !i128 {
     const file_handle = try std.fs.openFileAbsolute(file_path, .{});
     defer file_handle.close();
-    const metadata = try file_handle.metadata();
-    return metadata.modified();
+    const metadata = try file_handle.stat();
+    return metadata.mtime;
 }
 
 const GameCodeLinux = struct {
@@ -367,35 +379,32 @@ fn buildExePathFileName(dir_path: []const u8, file_name: [:0]const u8, buffer: [
 fn fmtSdlDrivers(
     current_driver: [*:0]const u8,
     num_drivers: c_int,
-    getDriver: *const fn (c_int) callconv(.C) ?[*:0]const u8,
-) std.fmt.Formatter(formatSdlDrivers) {
-    return .{ .data = .{
+    getDriver: *const fn (c_int) callconv(.c) ?[*:0]const u8,
+) FormatSdlDrivers {
+    return .{
         .current_driver = current_driver,
         .num_drivers = num_drivers,
         .getDriver = getDriver,
-    } };
+    };
 }
 
-fn formatSdlDrivers(
-    context: struct {
-        current_driver: [*:0]const u8,
-        num_drivers: c_int,
-        getDriver: *const fn (c_int) callconv(.C) ?[*:0]const u8,
-    },
-    comptime _: []const u8,
-    _: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    var i: c_int = 0;
-    while (i < context.num_drivers) : (i += 1) {
-        if (i != 0) try writer.writeAll(", ");
-        const driver = context.getDriver(i).?;
-        try writer.writeAll(std.mem.span(driver));
-        if (std.mem.orderZ(u8, context.current_driver, driver) == .eq) {
-            try writer.writeAll(" (current)");
+const FormatSdlDrivers = struct {
+    current_driver: [*:0]const u8,
+    num_drivers: c_int,
+    getDriver: *const fn (c_int) callconv(.c) ?[*:0]const u8,
+
+    pub fn format(context: FormatSdlDrivers, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        var i: c_int = 0;
+        while (i < context.num_drivers) : (i += 1) {
+            if (i != 0) try writer.writeAll(", ");
+            const driver = context.getDriver(i).?;
+            try writer.writeAll(std.mem.span(driver));
+            if (std.mem.orderZ(u8, context.current_driver, driver) == .eq) {
+                try writer.writeAll(" (current)");
+            }
         }
     }
-}
+};
 
 /// Converts the return of an SDL function to an error union.
 inline fn errify(value: anytype) error{SdlError}!switch (@typeInfo(@TypeOf(value))) {
