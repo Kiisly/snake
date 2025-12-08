@@ -11,6 +11,7 @@ const game_API = @import("game_API.zig");
 const GameMemory = game_API.Memory;
 const GameInput = game_API.Input;
 const GameOffscreenBuffer = game_API.OffscreenBuffer;
+const Arena = @import("Arena.zig");
 
 const TileMapPosition = struct {
     offset: Vector2 = .{}, // Offset from the center of a tile
@@ -27,7 +28,8 @@ const Entity = struct {
 };
 
 const GameState = struct {
-    snake_segments: [tile_count]Entity,
+    permanent_arena: Arena,
+    snake_segments: []Entity,
     snake_segment_count: u8 = 3,
 
     tile_map: [tile_count]Vector2 = [_]Vector2{.{}} ** tile_count,
@@ -37,10 +39,11 @@ const GameState = struct {
 
     const window_height = 540;
     const window_width = 960;
+
     pub const tile_side_pixels = 60.0;
     pub const tiles_per_height: u32 = window_height / tile_side_pixels;
     pub const tiles_per_width: u32 = window_width / tile_side_pixels;
-    const tile_count = tiles_per_height * tiles_per_width;
+    pub const tile_count = tiles_per_height * tiles_per_width;
 };
 
 pub export fn gameUpdateAndRender(
@@ -61,7 +64,11 @@ pub export fn gameUpdateAndRender(
 
     if (!memory.is_initialized) {
         memory.is_initialized = true;
-        game_state.* = .{ .snake_segments = undefined };
+
+        game_state.* = .{
+            .permanent_arena = .init(memory.permanent_storage[@sizeOf(GameState)..]),
+            .snake_segments = game_state.permanent_arena.pushMany(Entity, GameState.tile_count),
+        };
 
         for (0..game_state.snake_segment_count) |i| {
             const snake_segment = &game_state.snake_segments[i];
@@ -98,7 +105,7 @@ pub export fn gameUpdateAndRender(
     }
 
     moveSnake(
-        &game_state.snake_segments,
+        game_state.snake_segments,
         game_state.snake_segment_count,
         &game_state.tile_map,
         input.delta_time,
