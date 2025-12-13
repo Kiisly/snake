@@ -5,6 +5,7 @@ comptime {
 const std = @import("std");
 const assert = std.debug.assert;
 const print = std.debug.print;
+const lerp = std.math.lerp;
 
 const Vector2 = @import("Vector2.zig");
 const game_API = @import("game_API.zig");
@@ -12,27 +13,20 @@ const GameMemory = game_API.Memory;
 const GameInput = game_API.Input;
 const GameOffscreenBuffer = game_API.OffscreenBuffer;
 const Arena = @import("Arena.zig");
+const queue = @import("queue.zig");
 
-const TileMapPosition = struct {
-    offset: Vector2 = .{}, // Offset from the center of a tile
-    coord_x: u32 = 0,
-    coord_y: u32 = 0,
-};
+const Snake = struct {
+    body: queue.Queue(Vector2), // Tiles occupied by the snake
+    direction: Vector2,
+    new_direction: Vector2,
 
-const Entity = struct {
-    position: TileMapPosition = .{},
-    dimensions: Vector2 = .{ .x = 1.0, .y = 1.0 },
-    velocity: Vector2 = .{},
-    direction: Vector2 = .right,
-    new_direction: Vector2 = .right,
+    pub const initial_length = 3;
 };
 
 const GameState = struct {
     permanent_arena: Arena,
-    snake_segments: []Entity,
-    snake_segment_count: u8 = 3,
-
-    tile_map: [tile_count]Vector2 = [_]Vector2{.{}} ** tile_count,
+    snake: Snake,
+    step_cooldown: f32 = 0,
 
     x_offset: u8 = 0,
     y_offset: u8 = 0,
@@ -40,6 +34,7 @@ const GameState = struct {
     const window_height = 540;
     const window_width = 960;
 
+    pub const step_interval = 0.125;
     pub const tile_side_pixels = 60.0;
     pub const tiles_per_height: u32 = window_height / tile_side_pixels;
     pub const tiles_per_width: u32 = window_width / tile_side_pixels;
@@ -51,240 +46,183 @@ pub export fn gameUpdateAndRender(
     input: *GameInput,
     buffer: *GameOffscreenBuffer,
 ) callconv(.c) void {
-
-    //@breakpoint();
     assert(@sizeOf(GameState) <= memory.permanent_storage.len);
     const game_state: *GameState = @ptrCast(@alignCast(memory.permanent_storage));
-
-    const tile_side_meters = 1.0;
-    const tile_side_pixels = GameState.tile_side_pixels;
-    const meters_to_pixels = tile_side_pixels / tile_side_meters;
-    const tiles_per_height = GameState.tiles_per_height;
-    const tiles_per_width = GameState.tiles_per_width;
 
     if (!memory.is_initialized) {
         memory.is_initialized = true;
 
         game_state.* = .{
             .permanent_arena = .init(memory.permanent_storage[@sizeOf(GameState)..]),
-            .snake_segments = game_state.permanent_arena.pushMany(Entity, GameState.tile_count),
+            .snake = .{
+                .body = .init(&game_state.permanent_arena, GameState.tile_count),
+                .direction = .right,
+                .new_direction = .right,
+            },
         };
 
-        for (0..game_state.snake_segment_count) |i| {
-            const snake_segment = &game_state.snake_segments[i];
-            const coord_x = (game_state.snake_segment_count - 1 - @as(u8, @intCast(i)));
-            snake_segment.* = .{
-                .position = .{ .offset = .{}, .coord_x = coord_x, .coord_y = 1 },
-                .dimensions = .{ .x = tile_side_meters, .y = tile_side_meters },
-            };
+        for (0..Snake.initial_length) |i| {
+            const snake_segment: Vector2 = .{ .x = @floatFromInt(i), .y = 3 };
+            game_state.snake.body.enqueue(snake_segment);
         }
     }
-    const snake_head = &game_state.snake_segments[0];
+
+    const snake = &game_state.snake;
 
     const controller = game_API.getController(input, 0);
     for (controller.buttons) |button| {
         if (button.ended_down) {
             switch (button.name) {
                 .up => {
-                    snake_head.new_direction = .up;
+                    snake.new_direction = .up;
                 },
 
                 .down => {
-                    snake_head.new_direction = .down;
+                    snake.new_direction = .down;
                 },
 
                 .left => {
-                    snake_head.new_direction = .left;
+                    snake.new_direction = .left;
                 },
 
                 .right => {
-                    snake_head.new_direction = .right;
+                    snake.new_direction = .right;
                 },
             }
         }
     }
 
-    moveSnake(
-        game_state.snake_segments,
-        game_state.snake_segment_count,
-        &game_state.tile_map,
+    stepSnake(
+        snake,
         input.delta_time,
-        tiles_per_width,
-        tiles_per_height,
-        tile_side_meters,
+        &game_state.step_cooldown,
+        GameState.step_interval,
     );
 
     drawGradient(buffer, game_state.x_offset, game_state.y_offset);
     game_state.x_offset +%= 1;
     game_state.y_offset +%= 1;
 
-    { // Draw snake segments
-        //const screen_center_x = @as(f32, @floatFromInt(backbuffer.width)) * 0.5;
-        //const screen_center_y = @as(f32, @floatFromInt(backbuffer.height)) * 0.5;
-        //const central_tile_upper_left = Vector2{
-        //    .x = screen_center_x - 0.5 * tile_side_pixels,
-        //    .y = screen_center_y - 0.5 * tile_side_pixels,
-        //};
-        //const central_tile_lower_right = Vector2{
-        //    .x = screen_center_x + 0.5 * tile_side_pixels,
-        //    .y = screen_center_y + 0.5 * tile_side_pixels,
-        //};
-        //drawRectangle(&backbuffer, central_tile_upper_left, central_tile_lower_right, 0.1, 0.4, 0.7);
+    drawSnake(
+        buffer,
+        snake,
+        game_state.step_cooldown,
+    );
+}
 
-        //const half_tile_side_meters = tile_side_meters * 0.5;
-        for (0..game_state.snake_segment_count) |i| {
-            //const is_snake_tail = i == (game_state.snake_segment_count - 1);
-            const snake_segment = &game_state.snake_segments[i];
+fn worldSpaceToScreenSpace(v: Vector2, window_height: f32) Vector2 {
+    return .{ .x = v.x, .y = window_height - v.y };
+}
 
-            const max_coord_y = tiles_per_height - 1;
-            const tile_upper_left = Vector2{
-                .x = @as(f32, @floatFromInt(snake_segment.position.coord_x)) * tile_side_pixels,
-                .y = @as(f32, @floatFromInt(max_coord_y - snake_segment.position.coord_y)) * tile_side_pixels,
-            };
-            //const tile_lower_right = Vector2{
-            //    .x = tile_upper_left.x + tile_side_pixels,
-            //    .y = tile_upper_left.y + tile_side_pixels,
-            //};
-            //if (i == 0) {
-            //    drawRectangle(buffer, tile_upper_left, tile_lower_right, 1, 1, 1);
-            //}
+fn drawSnake(
+    buffer: *const GameOffscreenBuffer,
+    snake: *const Snake,
+    step_cooldown: f32,
+) void {
+    const tile_side_pixels = GameState.tile_side_pixels;
+    const t = step_cooldown / GameState.step_interval;
+    const distance = lerp(0.0, tile_side_pixels, t);
 
-            const tile_center = Vector2{
-                .x = tile_upper_left.x + 0.5 * tile_side_pixels,
-                .y = tile_upper_left.y + 0.5 * tile_side_pixels,
-            };
+    const head_tile = snake.body.get(snake.body.size - 1);
+    var head_upper_left_world: Vector2 = .{
+        .x = head_tile.x * tile_side_pixels,
+        .y = (head_tile.y + 1) * tile_side_pixels,
+    };
+    head_upper_left_world = .add(
+        head_upper_left_world,
+        .scale(snake.direction, -distance),
+    );
 
-            const snake_center = Vector2{
-                .x = tile_center.x + snake_segment.position.offset.x * meters_to_pixels,
-                .y = tile_center.y - snake_segment.position.offset.y * meters_to_pixels,
-            };
+    const window_height: f32 = @floatFromInt(buffer.height);
+    const head_upper_left = worldSpaceToScreenSpace(
+        head_upper_left_world,
+        window_height,
+    );
+    const head_lower_right: Vector2 = .addScalar(
+        head_upper_left,
+        tile_side_pixels,
+    );
 
-            const snake_upper_left = Vector2{
-                .x = snake_center.x - 0.5 * snake_segment.dimensions.x * meters_to_pixels,
-                .y = snake_center.y - 0.5 * snake_segment.dimensions.y * meters_to_pixels,
-            };
+    drawRectangle(buffer, head_upper_left, head_lower_right, 0.0, 0.7, 0.4);
 
-            const snake_lower_right = Vector2{
-                .x = snake_upper_left.x + snake_segment.dimensions.x * meters_to_pixels,
-                .y = snake_upper_left.y + snake_segment.dimensions.y * meters_to_pixels,
-            };
+    const tail_tile = snake.body.get(0);
+    const next_tail_tile = snake.body.get(1);
+    var tail_direction: Vector2 = .sub(next_tail_tile, tail_tile);
+    if (tail_direction.lengthSquared() > 1.0) {
+        tail_direction = .scale(.normalized(tail_direction), -1);
+    }
+    var tail_lower_right_world: Vector2 = .{
+        .x = next_tail_tile.x * tile_side_pixels + tile_side_pixels,
+        .y = next_tail_tile.y * tile_side_pixels,
+    };
+    var tail_upper_left_world: Vector2 = .{
+        .x = tail_lower_right_world.x - tile_side_pixels,
+        .y = tail_lower_right_world.y + tile_side_pixels,
+    };
+    tail_upper_left_world = .add(
+        tail_upper_left_world,
+        .scale(tail_direction, -distance),
+    );
+    tail_lower_right_world = .add(
+        tail_lower_right_world,
+        .scale(tail_direction, -distance),
+    );
 
-            //if (!is_snake_tail) {
-            //    snake_lower_right = snake_lower_right.add(
-            //        snake_segment.direction.scale(-snake_segment.position.offset.length() * meters_to_pixels).scale(meters_to_pixels),
-            //    );
-            //}
-            drawRectangle(buffer, snake_upper_left, snake_lower_right, 0.0, 0.7, 0.4);
+    const tail_upper_left = worldSpaceToScreenSpace(
+        tail_upper_left_world,
+        window_height,
+    );
+    const tail_lower_right = worldSpaceToScreenSpace(
+        tail_lower_right_world,
+        window_height,
+    );
 
-            //if (!is_snake_tail) {
-            //    //const snake_bottom = snake_center.add(snake_segment.direction.scale(tile_side_pixels * -0.5));
-            //    const new_pos = getNewPosition(
-            //        snake_segment.position,
-            //        snake_segment.direction.scale(-half_tile_side_meters),
-            //        tiles_per_width,
-            //        tiles_per_height,
-            //        tile_side_meters,
-            //    );
-            //    tile_upper_left = Vector2{
-            //        .x = @as(f32, @floatFromInt(new_pos.coord_x)) * tile_side_pixels,
-            //        .y = @as(f32, @floatFromInt(max_coord_y - new_pos.coord_y)) * tile_side_pixels,
-            //    };
-            //    const tile_lower_right = Vector2{
-            //        .x = tile_upper_left.x + tile_side_pixels,
-            //        .y = tile_upper_left.y + tile_side_pixels,
-            //    };
-            //    drawRectangle(buffer, tile_upper_left, tile_lower_right, 0.0, 0.7, 0.4);
-            //}
-        }
+    drawRectangle(buffer, tail_upper_left, tail_lower_right, 0.0, 0.7, 0.4);
+
+    // Draw tiles occupied by the snake except head and tail
+    const max_coord_y = GameState.tiles_per_height - 1;
+    for (1..snake.body.size - 1) |i| {
+        const tile = snake.body.get(i);
+        const tile_upper_left: Vector2 = .{
+            .x = tile.x * tile_side_pixels,
+            .y = (max_coord_y - tile.y) * tile_side_pixels,
+        };
+
+        const tile_lower_right: Vector2 = .addScalar(tile_upper_left, tile_side_pixels);
+        drawRectangle(buffer, tile_upper_left, tile_lower_right, 0.0, 0.7, 0.4);
     }
 }
 
-fn moveSnake(
-    snake_segments: []Entity,
-    snake_segment_count: u8,
-    direction_map: []Vector2,
+fn stepSnake(
+    snake: *Snake,
     dt: f32,
-    tiles_per_width: i32,
-    tiles_per_height: i32,
-    tile_side_meters: f32,
+    step_cooldown: *f32,
+    step_interval: f32,
 ) void {
-    const snake_head = &snake_segments[0];
-    const snake_speed = 55.0;
-    var acceleration = snake_head.direction.scale(snake_speed).sub(
-        snake_head.velocity.scale(10),
-    );
-    var snake_delta = Vector2.add(
-        acceleration.scale(0.5 * dt * dt),
-        snake_head.velocity.scale(dt),
-    );
-    snake_head.velocity = snake_head.velocity.add(acceleration.scale(dt));
-    const distance_traveled = snake_delta.length();
-
-    var new_position = getNewPosition(
-        snake_head.position,
-        snake_delta,
-        tiles_per_width,
-        tiles_per_height,
-        tile_side_meters,
-    );
-
-    for (0..snake_segment_count) |i| {
-        const snake_segment = &snake_segments[i];
-        const is_snake_head = i == 0;
-
-        if (!is_snake_head) {
-            acceleration = snake_segment.direction.scale(snake_speed).sub(
-                snake_segment.velocity.scale(10),
-            );
-            snake_delta = snake_segment.direction.scale(distance_traveled);
-            snake_segment.velocity = snake_segment.velocity.add(acceleration.scale(dt));
-
-            new_position = getNewPosition(
-                snake_segment.position,
-                snake_delta,
-                tiles_per_width,
-                tiles_per_height,
-                tile_side_meters,
-            );
-
-            const previous_snake_segment = &snake_segments[i - 1];
-            if (new_position.coord_x == previous_snake_segment.position.coord_x and
-                new_position.coord_y == previous_snake_segment.position.coord_y)
-            {
-                break;
-            }
+    step_cooldown.* -= dt;
+    if (step_cooldown.* <= 0.0) {
+        if (Vector2.dot(snake.direction, snake.new_direction) == 0.0) {
+            snake.direction = snake.new_direction;
         }
 
-        const crossed_center_of_tile = snake_segment.position.offset.dot(
-            snake_segment.position.offset.add(snake_delta),
-        ) <= 0.0;
-        const accept_change_of_direction = snake_segment.new_direction.dot(
-            snake_segment.direction,
-        ) == 0.0;
-        if (accept_change_of_direction and crossed_center_of_tile) {
-            snake_segment.direction = snake_segment.new_direction;
-            snake_segment.position.offset = snake_segment.new_direction.scale(
-                snake_segment.position.offset.add(snake_delta).length(),
-            );
-            snake_segment.velocity = .{};
-        } else {
-            snake_segment.position = new_position;
-        }
-
-        const change_of_tile = ((new_position.coord_x != snake_segment.position.coord_x) or
-            (new_position.coord_y != snake_segment.position.coord_y));
-
-        const tile_index = (snake_segment.position.coord_y * @as(u32, @intCast(tiles_per_width)) +
-            snake_segment.position.coord_x);
-        if (change_of_tile and !is_snake_head) {
-            snake_segment.new_direction = direction_map[tile_index];
-        }
-        direction_map[tile_index] = snake_segment.direction;
+        const tiles_per_width = GameState.tiles_per_width;
+        const tiles_per_height = GameState.tiles_per_height;
+        var next_head: Vector2 = .add(
+            snake.body.get(snake.body.size - 1),
+            snake.direction,
+        );
+        next_head = .{
+            .x = @mod(next_head.x, tiles_per_width),
+            .y = @mod(next_head.y, tiles_per_height),
+        };
+        snake.body.enqueue(next_head);
+        _ = snake.body.dequeue();
+        step_cooldown.* = step_interval;
     }
 }
 
 fn drawRectangle(
-    buffer: *GameOffscreenBuffer,
+    buffer: *const GameOffscreenBuffer,
     min: Vector2,
     max: Vector2,
     r: f32,
@@ -320,11 +258,7 @@ fn drawRectangle(
     }
 }
 
-fn drawGradient(
-    buffer: *GameOffscreenBuffer,
-    x_offset: u8,
-    y_offset: u8,
-) void {
+fn drawGradient(buffer: *const GameOffscreenBuffer, x_offset: u8, y_offset: u8) void {
     const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory));
     const height: usize = @intCast(buffer.height);
     const width: usize = @intCast(buffer.width);
@@ -336,66 +270,4 @@ fn drawGradient(
             pixels[row * width + column] = red | green | blue;
         }
     }
-}
-
-fn getNewPosition(
-    old_position: TileMapPosition,
-    new_offset: Vector2,
-    tiles_per_width: i32,
-    tiles_per_height: i32,
-    tile_side_meters: f32,
-) TileMapPosition {
-    var result: TileMapPosition = undefined;
-    result.offset = old_position.offset.add(new_offset);
-    result.coord_x, result.offset.x = getNewCoordinateAndRelativeOffset(
-        old_position.coord_x,
-        result.offset.x,
-        tiles_per_width,
-        tile_side_meters,
-    );
-    result.coord_y, result.offset.y = getNewCoordinateAndRelativeOffset(
-        old_position.coord_y,
-        result.offset.y,
-        tiles_per_height,
-        tile_side_meters,
-    );
-    return result;
-}
-
-fn getNewCoordinateAndRelativeOffset(
-    coord: u32,
-    offset: f32,
-    max_coord: i32,
-    tile_side_meters: f32,
-) struct { u32, f32 } {
-    //const new_offset: i32 = @intFromFloat(@round(offset / tile_side_meters));
-    var result_coord: i32 = @as(i32, @intCast(coord)) + @as(i32, @intFromFloat(@round(offset / tile_side_meters)));
-    if (result_coord >= max_coord) {
-        result_coord = 0;
-    } else if (result_coord < 0) {
-        result_coord = max_coord - 1;
-    }
-    const result_offset = offset - @round(offset);
-    return .{ @intCast(result_coord), result_offset };
-}
-
-fn initializeEntity(
-    x: u32,
-    y: u32,
-    offset: Vector2,
-    dims: Vector2,
-    velocity: Vector2,
-    dir: Vector2,
-) Entity {
-    return .{
-        .position = .{
-            .coord_x = x,
-            .coord_y = y,
-            .offset = offset,
-        },
-        .dimensions = dims,
-        .velocity = velocity,
-        .direction = dir,
-        .new_direction = dir,
-    };
 }

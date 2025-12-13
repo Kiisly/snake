@@ -45,6 +45,10 @@ pub fn add(a: Vector2, b: Vector2) Vector2 {
     return result;
 }
 
+pub fn addScalar(a: Vector2, b: f32) Vector2 {
+    return .{ .x = a.x + b, .y = a.y + b };
+}
+
 pub fn div(a: Vector2, scalar: f32) Vector2 {
     assert(scalar != 0);
     const result = Vector2{
