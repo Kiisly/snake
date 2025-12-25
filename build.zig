@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
         }),
         .use_llvm = use_llvm,
     });
+    game_lib.linkLibC();
 
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
