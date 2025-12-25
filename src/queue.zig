@@ -3,6 +3,7 @@ const assert = std.debug.assert;
 
 const Arena = @import("Arena.zig");
 
+// TODO: Add tests
 /// Generic queue initialized with static size
 pub fn Queue(comptime T: type) type {
     return struct {
@@ -29,6 +30,18 @@ pub fn Queue(comptime T: type) type {
             queue.tail += 1;
             queue.tail %= queue.items.len;
             queue.size += 1;
+        }
+
+        pub fn enqueueDisplace(queue: *Self, item: T) void {
+            if (queue.isFull()) {
+                queue.items[queue.tail] = item;
+                queue.tail += 1;
+                queue.tail %= queue.items.len;
+                queue.head += 1;
+                queue.head %= queue.items.len;
+            } else {
+                queue.enqueue(item);
+            }
         }
 
         pub fn dequeue(queue: *Self) T {
