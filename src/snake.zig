@@ -13,12 +13,12 @@ const GameMemory = game_API.Memory;
 const GameInput = game_API.Input;
 const GameOffscreenBuffer = game_API.OffscreenBuffer;
 const Arena = @import("Arena.zig");
-const queue = @import("queue.zig");
+const Queue = @import("queue.zig").Queue;
 
 const Snake = struct {
-    body: queue.Queue(Vector2), // Tiles occupied by the snake
+    body: Queue(Vector2), // Tiles occupied by the snake
     direction: Vector2,
-    new_direction: Vector2,
+    turn_queue: Queue(Vector2),
 
     pub const initial_length = 3;
 };
@@ -28,13 +28,16 @@ const GameState = struct {
     snake: Snake,
     step_cooldown: f32 = 0,
 
+    egg: Vector2,
+    eaten_egg: bool,
+
     x_offset: u8 = 0,
     y_offset: u8 = 0,
 
     const window_height = 540;
     const window_width = 960;
 
-    pub const step_interval = 0.125;
+    pub const step_interval = 0.160;
     pub const tile_side_pixels = 60.0;
     pub const tiles_per_height: u32 = window_height / tile_side_pixels;
     pub const tiles_per_width: u32 = window_width / tile_side_pixels;
@@ -57,8 +60,10 @@ pub export fn gameUpdateAndRender(
             .snake = .{
                 .body = .init(&game_state.permanent_arena, GameState.tile_count),
                 .direction = .right,
-                .new_direction = .right,
+                .turn_queue = .init(&game_state.permanent_arena, 4),
             },
+            .egg = .{ .x = 5, .y = 3 },
+            .eaten_egg = false,
         };
 
         for (0..Snake.initial_length) |i| {
@@ -74,19 +79,19 @@ pub export fn gameUpdateAndRender(
         if (button.ended_down) {
             switch (button.name) {
                 .up => {
-                    snake.new_direction = .up;
+                    snake.turn_queue.enqueueDisplace(.up);
                 },
 
                 .down => {
-                    snake.new_direction = .down;
+                    snake.turn_queue.enqueueDisplace(.down);
                 },
 
                 .left => {
-                    snake.new_direction = .left;
+                    snake.turn_queue.enqueueDisplace(.left);
                 },
 
                 .right => {
-                    snake.new_direction = .right;
+                    snake.turn_queue.enqueueDisplace(.right);
                 },
             }
         }
@@ -94,6 +99,8 @@ pub export fn gameUpdateAndRender(
 
     stepSnake(
         snake,
+        game_state.egg,
+        &game_state.eaten_egg,
         input.delta_time,
         &game_state.step_cooldown,
         GameState.step_interval,
@@ -102,6 +109,17 @@ pub export fn gameUpdateAndRender(
     drawGradient(buffer, game_state.x_offset, game_state.y_offset);
     game_state.x_offset +%= 1;
     game_state.y_offset +%= 1;
+
+    if (!game_state.eaten_egg) {
+        const tile_side_pixels = GameState.tile_side_pixels;
+        const max_coord_y = GameState.tiles_per_height - 1;
+        const egg_upper_left: Vector2 = .{
+            .x = game_state.egg.x * tile_side_pixels,
+            .y = (max_coord_y - game_state.egg.y) * tile_side_pixels,
+        };
+        const egg_lower_right: Vector2 = .addScalar(egg_upper_left, tile_side_pixels);
+        drawRectangle(buffer, egg_upper_left, egg_lower_right, 0.7, 0.5, 0.3);
+    }
 
     drawSnake(
         buffer,
@@ -151,31 +169,21 @@ fn drawSnake(
     if (tail_direction.lengthSquared() > 1.0) {
         tail_direction = .scale(.normalized(tail_direction), -1);
     }
-    var tail_lower_right_world: Vector2 = .{
-        .x = next_tail_tile.x * tile_side_pixels + tile_side_pixels,
-        .y = next_tail_tile.y * tile_side_pixels,
-    };
+
     var tail_upper_left_world: Vector2 = .{
-        .x = tail_lower_right_world.x - tile_side_pixels,
-        .y = tail_lower_right_world.y + tile_side_pixels,
+        .x = tail_tile.x * tile_side_pixels,
+        .y = (tail_tile.y + 1) * tile_side_pixels,
     };
     tail_upper_left_world = .add(
         tail_upper_left_world,
-        .scale(tail_direction, -distance),
+        .scale(tail_direction, tile_side_pixels - distance),
     );
-    tail_lower_right_world = .add(
-        tail_lower_right_world,
-        .scale(tail_direction, -distance),
-    );
-
     const tail_upper_left = worldSpaceToScreenSpace(
         tail_upper_left_world,
         window_height,
     );
-    const tail_lower_right = worldSpaceToScreenSpace(
-        tail_lower_right_world,
-        window_height,
-    );
+
+    const tail_lower_right: Vector2 = .addScalar(tail_upper_left, tile_side_pixels);
 
     drawRectangle(buffer, tail_upper_left, tail_lower_right, 0.0, 0.7, 0.4);
 
@@ -187,7 +195,6 @@ fn drawSnake(
             .x = tile.x * tile_side_pixels,
             .y = (max_coord_y - tile.y) * tile_side_pixels,
         };
-
         const tile_lower_right: Vector2 = .addScalar(tile_upper_left, tile_side_pixels);
         drawRectangle(buffer, tile_upper_left, tile_lower_right, 0.0, 0.7, 0.4);
     }
@@ -195,28 +202,36 @@ fn drawSnake(
 
 fn stepSnake(
     snake: *Snake,
+    egg: Vector2,
+    eaten_egg: *bool,
     dt: f32,
     step_cooldown: *f32,
     step_interval: f32,
 ) void {
     step_cooldown.* -= dt;
     if (step_cooldown.* <= 0.0) {
-        if (Vector2.dot(snake.direction, snake.new_direction) == 0.0) {
-            snake.direction = snake.new_direction;
+        while (!snake.turn_queue.isEmpty()) {
+            const new_direction = snake.turn_queue.dequeue();
+            if (Vector2.dot(snake.direction, new_direction) == 0.0) {
+                snake.direction = new_direction;
+                break;
+            }
         }
 
-        const tiles_per_width = GameState.tiles_per_width;
-        const tiles_per_height = GameState.tiles_per_height;
         var next_head: Vector2 = .add(
             snake.body.get(snake.body.size - 1),
             snake.direction,
         );
         next_head = .{
-            .x = @mod(next_head.x, tiles_per_width),
-            .y = @mod(next_head.y, tiles_per_height),
+            .x = @mod(next_head.x, GameState.tiles_per_width),
+            .y = @mod(next_head.y, GameState.tiles_per_height),
         };
+        if (!eaten_egg.* and next_head.x == egg.x and next_head.y == egg.y) {
+            eaten_egg.* = true;
+        } else {
+            _ = snake.body.dequeue();
+        }
         snake.body.enqueue(next_head);
-        _ = snake.body.dequeue();
         step_cooldown.* = step_interval;
     }
 }

@@ -111,7 +111,7 @@ pub fn main() !void {
 
     var buffer_path_game_lib_copy: [std.fs.max_path_bytes]u8 = undefined;
     // This needs to be null terminated for c interop
-    const abs_path_game_lib_copy = buildExePathFileName(abs_path_exe_dir, "(copy)libsnake.so", &buffer_path_game_lib_copy);
+    const abs_path_game_lib_copy = buildExePathFileName(abs_path_exe_dir, "copy_libsnake.so", &buffer_path_game_lib_copy);
 
     var game_code = try loadGameCodeLinux(abs_path_game_lib, abs_path_game_lib_copy);
 
