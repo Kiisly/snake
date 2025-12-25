@@ -1,5 +1,6 @@
 const assert = @import("std").debug.assert;
 
+// TODO: Add tests
 memory: []u8,
 used: MemoryIndex,
 
@@ -18,7 +19,7 @@ pub fn push(arena: *Arena, T: type) *T {
 pub fn pushMany(arena: *Arena, T: type, count: usize) []T {
     const size = count * @sizeOf(T);
     assert((arena.used + size) <= arena.memory.len);
-    const memory: []T = @ptrCast(@alignCast(arena.memory[arena.used..size]));
+    const memory: []T = @ptrCast(@alignCast(arena.memory[arena.used..(arena.used + size)]));
     arena.used += size;
     return memory;
 }
