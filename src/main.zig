@@ -24,7 +24,7 @@ const target_triple: [:0]const u8 = lable: {
 
 const PlatformOffscreenBuffer = struct {
     // NOTE: Pixels are always 32 bits wide. Memory order (little-endian): B-G-R-A
-    memory: []u8,
+    //memory: []u8,
     texture: *c.SDL_Texture,
     width: i32,
     height: i32,
@@ -97,6 +97,15 @@ pub fn main() !void {
     defer c.SDL_DestroyWindow(window);
     defer c.SDL_DestroyRenderer(renderer);
 
+    if (!c.SDL_SetRenderLogicalPresentation(
+        renderer,
+        window_width,
+        window_height,
+        c.SDL_LOGICAL_PRESENTATION_LETTERBOX,
+    )) {
+        sdl_log.debug("Failed to set logical presentation: {s}", .{c.SDL_GetError()});
+    }
+
     sdl_log.debug("SDL render drivers: {f}", .{fmtSdlDrivers(
         c.SDL_GetRendererName(renderer).?,
         c.SDL_GetNumRenderDrivers(),
@@ -140,7 +149,6 @@ pub fn main() !void {
         .width = window_width,
         .height = window_height,
         .pitch = window_width * 4,
-        .memory = try arena.alloc(u8, @intCast(window_width * window_height * 4)),
         .texture = try errify(c.SDL_CreateTexture(
             renderer,
             c.SDL_PIXELFORMAT_XRGB8888,
@@ -245,18 +253,27 @@ pub fn main() !void {
         }
 
         var game_backbuffer: GameOffscreenBuffer = .{
-            .memory = @ptrCast(backbuffer.memory.ptr),
+            .memory = undefined,
             .width = backbuffer.width,
             .height = backbuffer.height,
-            .pitch = backbuffer.pitch,
+            .pitch = undefined,
             .bytes_per_pixel = 4,
         };
+
+        try errify(c.SDL_LockTexture(
+            backbuffer.texture,
+            null,
+            &game_backbuffer.memory,
+            &game_backbuffer.pitch,
+        ));
+        assert(game_backbuffer.pitch == backbuffer.pitch);
 
         if (game_code.gameUpdateAndRender) |gameUpdateAndRender| {
             gameUpdateAndRender(&game_memory, game_new_input, &game_backbuffer);
         } else {
             print("Callback is null\n", .{});
         }
+        c.SDL_UnlockTexture(backbuffer.texture);
 
         // TODO: swap() function
         const temp = game_new_input;
@@ -349,15 +366,18 @@ fn copyBufferToWindow(
     fullscreen: bool,
     buffer: *const PlatformOffscreenBuffer,
 ) void {
-    _ = c.SDL_UpdateTexture(buffer.texture, null, buffer.memory.ptr, buffer.pitch);
-    var dest_rect: c.SDL_FRect = undefined;
-    if (fullscreen) {
-        dest_rect = .{ .w = @floatFromInt(window_width), .h = @floatFromInt(window_height) };
-    } else {
-        dest_rect = .{ .w = @floatFromInt(buffer.width), .h = @floatFromInt(buffer.height) };
-    }
+    _ = window_width;
+    _ = window_height;
+    _ = fullscreen;
+    //_ = c.SDL_UpdateTexture(buffer.texture, null, buffer.memory.ptr, buffer.pitch);
+    //var dest_rect: c.SDL_FRect = undefined;
+    //if (fullscreen) {
+    //    dest_rect = .{ .w = @floatFromInt(window_width), .h = @floatFromInt(window_height) };
+    //} else {
+    //    dest_rect = .{ .w = @floatFromInt(buffer.width), .h = @floatFromInt(buffer.height) };
+    //}
     _ = c.SDL_RenderClear(renderer);
-    _ = c.SDL_RenderTexture(renderer, buffer.texture, null, &dest_rect);
+    _ = c.SDL_RenderTexture(renderer, buffer.texture, null, null);
     _ = c.SDL_RenderPresent(renderer);
 }
 

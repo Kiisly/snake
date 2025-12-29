@@ -15,7 +15,7 @@ pub const Input = struct {
 };
 
 pub const OffscreenBuffer = struct {
-    memory: [*]u8,
+    memory: [*c]u8,
     width: i32,
     height: i32,
     pitch: i32,
