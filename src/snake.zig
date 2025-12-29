@@ -19,6 +19,7 @@ const Snake = struct {
     body: Queue(Vector2), // Tiles occupied by the snake
     direction: Vector2,
     turn_queue: Queue(Vector2),
+    eaten_egg: bool,
 
     pub const initial_length = 3;
 };
@@ -29,14 +30,15 @@ const GameState = struct {
     step_cooldown: f32 = 0,
 
     egg: Vector2,
-    eaten_egg: bool,
+
+    prng: std.Random.Xoshiro256,
+    rand: std.Random,
 
     x_offset: u8 = 0,
     y_offset: u8 = 0,
 
-    const window_height = 540;
     const window_width = 960;
-
+    pub const window_height = 540;
     pub const step_interval = 0.160;
     pub const tile_side_pixels = 60.0;
     pub const tiles_per_height: u32 = window_height / tile_side_pixels;
@@ -55,21 +57,29 @@ pub export fn gameUpdateAndRender(
     if (!memory.is_initialized) {
         memory.is_initialized = true;
 
+        var seed: u64 = undefined;
+        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+            seed = 92;
+        };
         game_state.* = .{
             .permanent_arena = .init(memory.permanent_storage[@sizeOf(GameState)..]),
             .snake = .{
                 .body = .init(&game_state.permanent_arena, GameState.tile_count),
                 .direction = .right,
                 .turn_queue = .init(&game_state.permanent_arena, 4),
+                .eaten_egg = false,
             },
-            .egg = .{ .x = 5, .y = 3 },
-            .eaten_egg = false,
+            .prng = std.Random.DefaultPrng.init(seed),
+            .rand = game_state.prng.random(),
+            .egg = undefined,
         };
 
         for (0..Snake.initial_length) |i| {
             const snake_segment: Vector2 = .{ .x = @floatFromInt(i), .y = 3 };
             game_state.snake.body.enqueue(snake_segment);
         }
+
+        game_state.egg = generateRandomEgg(game_state.rand, &game_state.snake);
     }
 
     const snake = &game_state.snake;
@@ -100,7 +110,6 @@ pub export fn gameUpdateAndRender(
     stepSnake(
         snake,
         game_state.egg,
-        &game_state.eaten_egg,
         input.delta_time,
         &game_state.step_cooldown,
         GameState.step_interval,
@@ -110,13 +119,14 @@ pub export fn gameUpdateAndRender(
     game_state.x_offset +%= 1;
     game_state.y_offset +%= 1;
 
-    if (!game_state.eaten_egg) {
+    if (snake.eaten_egg) {
+        game_state.egg = generateRandomEgg(game_state.rand, &game_state.snake);
+        snake.eaten_egg = false;
+    }
+
+    { // Draw egg
         const tile_side_pixels = GameState.tile_side_pixels;
-        const max_coord_y = GameState.tiles_per_height - 1;
-        const egg_upper_left: Vector2 = .{
-            .x = game_state.egg.x * tile_side_pixels,
-            .y = (max_coord_y - game_state.egg.y) * tile_side_pixels,
-        };
+        const egg_upper_left: Vector2 = tilemapSpaceToScreenSpace(game_state.egg);
         const egg_lower_right: Vector2 = .addScalar(egg_upper_left, tile_side_pixels);
         drawRectangle(buffer, egg_upper_left, egg_lower_right, 0.7, 0.5, 0.3);
     }
@@ -128,8 +138,53 @@ pub export fn gameUpdateAndRender(
     );
 }
 
-fn worldSpaceToScreenSpace(v: Vector2, window_height: f32) Vector2 {
-    return .{ .x = v.x, .y = window_height - v.y };
+fn generateRandomEgg(rand: std.Random, snake: *Snake) Vector2 {
+    var result: Vector2 = .{
+        .x = @floatFromInt(rand.uintLessThan(u8, GameState.tiles_per_width)),
+        .y = @floatFromInt(rand.uintLessThan(u4, GameState.tiles_per_height)),
+    };
+    while (isTileOccupiedBySnake(result, snake)) {
+        result = .{
+            .x = @floatFromInt(rand.uintLessThan(u8, GameState.tiles_per_width)),
+            .y = @floatFromInt(rand.uintLessThan(u4, GameState.tiles_per_height)),
+        };
+    }
+    return result;
+}
+
+fn isTileOccupiedBySnake(tile: Vector2, snake: *Snake) bool {
+    var occupied = false;
+    var it = snake.body.iterator();
+    while (it.next()) |snake_tile| {
+        if (tile.x == snake_tile.x and tile.y == snake_tile.y) {
+            occupied = true;
+            break;
+        }
+    }
+    return occupied;
+}
+
+fn tilemapToWorldSpace(v: Vector2) Vector2 {
+    return .{
+        .x = v.x * GameState.tile_side_pixels,
+        .y = (v.y + 1) * GameState.tile_side_pixels,
+    };
+}
+
+fn worldSpaceToScreenSpace(v: Vector2) Vector2 {
+    return .{
+        .x = v.x,
+        .y = @as(f32, @floatFromInt(GameState.window_height)) - v.y,
+    };
+}
+
+fn tilemapSpaceToScreenSpace(v: Vector2) Vector2 {
+    const window_height: f32 = @floatFromInt(GameState.window_height);
+    const result: Vector2 = .{
+        .x = v.x * GameState.tile_side_pixels,
+        .y = window_height - (v.y + 1) * GameState.tile_side_pixels,
+    };
+    return result;
 }
 
 fn drawSnake(
@@ -142,20 +197,13 @@ fn drawSnake(
     const distance = lerp(0.0, tile_side_pixels, t);
 
     const head_tile = snake.body.get(snake.body.size - 1);
-    var head_upper_left_world: Vector2 = .{
-        .x = head_tile.x * tile_side_pixels,
-        .y = (head_tile.y + 1) * tile_side_pixels,
-    };
+    var head_upper_left_world: Vector2 = tilemapToWorldSpace(head_tile);
     head_upper_left_world = .add(
         head_upper_left_world,
         .scale(snake.direction, -distance),
     );
 
-    const window_height: f32 = @floatFromInt(buffer.height);
-    const head_upper_left = worldSpaceToScreenSpace(
-        head_upper_left_world,
-        window_height,
-    );
+    const head_upper_left = worldSpaceToScreenSpace(head_upper_left_world);
     const head_lower_right: Vector2 = .addScalar(
         head_upper_left,
         tile_side_pixels,
@@ -170,31 +218,21 @@ fn drawSnake(
         tail_direction = .scale(.normalized(tail_direction), -1);
     }
 
-    var tail_upper_left_world: Vector2 = .{
-        .x = tail_tile.x * tile_side_pixels,
-        .y = (tail_tile.y + 1) * tile_side_pixels,
-    };
+    var tail_upper_left_world: Vector2 = tilemapToWorldSpace(tail_tile);
     tail_upper_left_world = .add(
         tail_upper_left_world,
         .scale(tail_direction, tile_side_pixels - distance),
     );
-    const tail_upper_left = worldSpaceToScreenSpace(
-        tail_upper_left_world,
-        window_height,
-    );
+    const tail_upper_left = worldSpaceToScreenSpace(tail_upper_left_world);
 
     const tail_lower_right: Vector2 = .addScalar(tail_upper_left, tile_side_pixels);
 
     drawRectangle(buffer, tail_upper_left, tail_lower_right, 0.0, 0.7, 0.4);
 
     // Draw tiles occupied by the snake except head and tail
-    const max_coord_y = GameState.tiles_per_height - 1;
     for (1..snake.body.size - 1) |i| {
         const tile = snake.body.get(i);
-        const tile_upper_left: Vector2 = .{
-            .x = tile.x * tile_side_pixels,
-            .y = (max_coord_y - tile.y) * tile_side_pixels,
-        };
+        const tile_upper_left: Vector2 = tilemapSpaceToScreenSpace(tile);
         const tile_lower_right: Vector2 = .addScalar(tile_upper_left, tile_side_pixels);
         drawRectangle(buffer, tile_upper_left, tile_lower_right, 0.0, 0.7, 0.4);
     }
@@ -203,7 +241,6 @@ fn drawSnake(
 fn stepSnake(
     snake: *Snake,
     egg: Vector2,
-    eaten_egg: *bool,
     dt: f32,
     step_cooldown: *f32,
     step_interval: f32,
@@ -218,16 +255,17 @@ fn stepSnake(
             }
         }
 
+        const current_head: Vector2 = snake.body.get(snake.body.size - 1);
         var next_head: Vector2 = .add(
-            snake.body.get(snake.body.size - 1),
+            current_head,
             snake.direction,
         );
         next_head = .{
             .x = @mod(next_head.x, GameState.tiles_per_width),
             .y = @mod(next_head.y, GameState.tiles_per_height),
         };
-        if (!eaten_egg.* and next_head.x == egg.x and next_head.y == egg.y) {
-            eaten_egg.* = true;
+        if (current_head.x == egg.x and current_head.y == egg.y) {
+            snake.eaten_egg = true;
         } else {
             _ = snake.body.dequeue();
         }
