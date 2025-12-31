@@ -4,7 +4,8 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const no_bin = b.option(bool, "no_bin", "Skip emitting binary. Use this for incremental compilation") orelse false;
-    const use_llvm = b.option(bool, "use_llvm", "Use LLVM instead of x86 backend") orelse false;
+    var use_llvm = b.option(bool, "use_llvm", "Use LLVM instead of x86 backend") orelse false;
+    if (optimize == .ReleaseFast) use_llvm = true;
 
     const game_lib = b.addLibrary(.{
         .linkage = .dynamic,
@@ -32,7 +33,7 @@ pub fn build(b: *std.Build) void {
 
     const sdl_dep = b.dependency("sdl", .{
         .target = target,
-        .optimize = optimize,
+        .optimize = std.builtin.OptimizeMode.ReleaseFast,
         .preferred_linkage = .dynamic,
     });
     const sdl_lib = sdl_dep.artifact("SDL3");
