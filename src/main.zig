@@ -130,7 +130,14 @@ pub fn main() !void {
     defer allocator.deinit();
     const arena = allocator.allocator();
 
+    var seed: u64 = undefined;
+    std.posix.getrandom(std.mem.asBytes(&seed)) catch {
+        seed = 92;
+    };
+    var prng = std.Random.DefaultPrng.init(seed);
+
     var game_memory: GameMemory = undefined;
+    game_memory.rand = prng.random();
     game_memory.is_initialized = false;
     game_memory.permanent_storage.len = megabytes(16);
     game_memory.transient_storage.len = megabytes(8);
@@ -139,6 +146,7 @@ pub fn main() !void {
     const total_game_memory_size = (game_memory.permanent_storage.len +
         game_memory.transient_storage.len + game_memory.cache_transient_storage.len);
     const game_memory_block = try arena.alloc(u8, total_game_memory_size);
+    @memset(game_memory_block, 0);
 
     game_memory.permanent_storage.ptr = game_memory_block.ptr;
     game_memory.transient_storage.ptr = game_memory.permanent_storage.ptr + game_memory.permanent_storage.len;
@@ -151,7 +159,7 @@ pub fn main() !void {
         .pitch = window_width * 4,
         .texture = try errify(c.SDL_CreateTexture(
             renderer,
-            c.SDL_PIXELFORMAT_XRGB8888,
+            c.SDL_PIXELFORMAT_ARGB8888,
             c.SDL_TEXTUREACCESS_STREAMING,
             window_width,
             window_height,
@@ -165,8 +173,7 @@ pub fn main() !void {
     const dt = 1.0 / target_fps;
 
     var input: [2]GameInput = undefined;
-    var game_old_input = &input[0];
-    var game_new_input = &input[1];
+    const game_new_input = &input[0];
 
     main_loop: while (true) {
         const current_write_time = try getFileLastWriteTime(abs_path_game_lib);
@@ -177,12 +184,8 @@ pub fn main() !void {
 
         game_new_input.delta_time = dt;
 
-        const old_kb_controller = game_API.getController(game_old_input, 0);
         var new_kb_controller = game_API.getController(game_new_input, 0);
         new_kb_controller.* = .init();
-        for (&new_kb_controller.buttons, &old_kb_controller.buttons) |*new_button, *old_button| {
-            new_button.ended_down = old_button.ended_down;
-        }
 
         var event: c.SDL_Event = undefined;
         while (c.SDL_PollEvent(&event)) {
@@ -218,6 +221,10 @@ pub fn main() !void {
 
                             c.SDL_SCANCODE_A, c.SDL_SCANCODE_LEFT => {
                                 handleKeyboardInput(getButton(&new_kb_controller.buttons, .left), is_down);
+                            },
+
+                            c.SDL_SCANCODE_SPACE => {
+                                handleKeyboardInput(getButton(&new_kb_controller.buttons, .pause), is_down);
                             },
 
                             else => {
@@ -263,7 +270,7 @@ pub fn main() !void {
         try errify(c.SDL_LockTexture(
             backbuffer.texture,
             null,
-            &game_backbuffer.memory,
+            @ptrCast(&game_backbuffer.memory),
             &game_backbuffer.pitch,
         ));
         assert(game_backbuffer.pitch == backbuffer.pitch);
@@ -275,14 +282,8 @@ pub fn main() !void {
         }
         c.SDL_UnlockTexture(backbuffer.texture);
 
-        // TODO: swap() function
-        const temp = game_new_input;
-        game_new_input = game_old_input;
-        game_old_input = temp;
-
-        var width: c_int = 0;
-        var height: c_int = 0;
-        _ = c.SDL_GetWindowSizeInPixels(window, &width, &height);
+        const width: c_int = 0;
+        const height: c_int = 0;
         copyBufferToWindow(renderer, width, height, fullscreen, &backbuffer);
     }
 }
@@ -300,9 +301,7 @@ inline fn gigabytes(n: usize) usize {
 }
 
 fn handleKeyboardInput(button: *game_API.ButtonState, is_down: bool) void {
-    if (button.ended_down != is_down) {
-        button.ended_down = is_down;
-    }
+    button.ended_down = is_down;
 }
 
 fn getFileLastWriteTime(file_path: [:0]const u8) !i128 {
@@ -369,13 +368,7 @@ fn copyBufferToWindow(
     _ = window_width;
     _ = window_height;
     _ = fullscreen;
-    //_ = c.SDL_UpdateTexture(buffer.texture, null, buffer.memory.ptr, buffer.pitch);
-    //var dest_rect: c.SDL_FRect = undefined;
-    //if (fullscreen) {
-    //    dest_rect = .{ .w = @floatFromInt(window_width), .h = @floatFromInt(window_height) };
-    //} else {
-    //    dest_rect = .{ .w = @floatFromInt(buffer.width), .h = @floatFromInt(buffer.height) };
-    //}
+
     _ = c.SDL_RenderClear(renderer);
     _ = c.SDL_RenderTexture(renderer, buffer.texture, null, null);
     _ = c.SDL_RenderPresent(renderer);

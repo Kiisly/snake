@@ -27,15 +27,20 @@ const Snake = struct {
 const GameState = struct {
     permanent_arena: Arena,
     snake: Snake,
-    step_cooldown: f32 = 0,
+    step_cooldown: f32,
 
     egg: Vector2,
 
-    prng: std.Random.Xoshiro256,
-    rand: std.Random,
-
     x_offset: u8 = 0,
     y_offset: u8 = 0,
+
+    mode: Mode,
+
+    const Mode = enum {
+        gameplay,
+        game_over,
+        pause,
+    };
 
     const window_width = 960;
     pub const window_height = 540;
@@ -56,97 +61,135 @@ pub export fn gameUpdateAndRender(
 
     if (!memory.is_initialized) {
         memory.is_initialized = true;
-
-        var seed: u64 = undefined;
-        std.posix.getrandom(std.mem.asBytes(&seed)) catch {
-            seed = 92;
-        };
-        game_state.* = .{
-            .permanent_arena = .init(memory.permanent_storage[@sizeOf(GameState)..]),
-            .snake = .{
-                .body = .init(&game_state.permanent_arena, GameState.tile_count),
-                .direction = .right,
-                .turn_queue = .init(&game_state.permanent_arena, 4),
-                .eaten_egg = false,
-            },
-            .prng = std.Random.DefaultPrng.init(seed),
-            .rand = game_state.prng.random(),
-            .egg = undefined,
-        };
-
-        for (0..Snake.initial_length) |i| {
-            const snake_segment: Vector2 = .{ .x = @floatFromInt(i), .y = 3 };
-            game_state.snake.body.enqueue(snake_segment);
-        }
-
-        game_state.egg = generateRandomEgg(game_state.rand, &game_state.snake);
+        restartGame(game_state, memory);
     }
 
     const snake = &game_state.snake;
-
     const controller = game_API.getController(input, 0);
-    for (controller.buttons) |button| {
-        if (button.ended_down) {
-            switch (button.name) {
-                .up => {
-                    snake.turn_queue.enqueueDisplace(.up);
-                },
+    switch (game_state.mode) {
+        .gameplay => {
+            for (controller.buttons) |button| {
+                if (button.ended_down) {
+                    switch (button.name) {
+                        .up => {
+                            snake.turn_queue.enqueueDisplace(.up);
+                        },
 
-                .down => {
-                    snake.turn_queue.enqueueDisplace(.down);
-                },
+                        .down => {
+                            snake.turn_queue.enqueueDisplace(.down);
+                        },
 
-                .left => {
-                    snake.turn_queue.enqueueDisplace(.left);
-                },
+                        .left => {
+                            snake.turn_queue.enqueueDisplace(.left);
+                        },
 
-                .right => {
-                    snake.turn_queue.enqueueDisplace(.right);
-                },
+                        .right => {
+                            snake.turn_queue.enqueueDisplace(.right);
+                        },
+
+                        .pause => {
+                            game_state.mode = .pause;
+                        },
+
+                        else => unreachable,
+                    }
+                }
             }
-        }
+
+            stepSnake(
+                snake,
+                game_state.egg,
+                &game_state.mode,
+                input.delta_time,
+                &game_state.step_cooldown,
+            );
+
+            drawColour(buffer, 125.0 / 255.0, 242.0 / 255.0, 242.0 / 255.0);
+            game_state.x_offset +%= 1;
+            game_state.y_offset +%= 1;
+
+            if (snake.eaten_egg) {
+                game_state.egg = generateRandomEgg(memory.rand, &game_state.snake);
+                snake.eaten_egg = false;
+            }
+
+            { // Draw egg
+                const egg_upper_left: Vector2 = tilemapSpaceToScreenSpace(game_state.egg);
+                const egg_lower_right: Vector2 = .addScalar(egg_upper_left, GameState.tile_side_pixels);
+                const r = 208.0 / 255.0;
+                const g = 232.0 / 255.0;
+                const b = 116.0 / 255.0;
+                drawRectangle(buffer, egg_upper_left, egg_lower_right, r, g, b);
+            }
+
+            drawSnake(buffer, snake, game_state.step_cooldown);
+        },
+
+        .game_over => {
+            for (controller.buttons) |button| {
+                if (button.ended_down) {
+                    restartGame(game_state, memory);
+                    break;
+                }
+            }
+        },
+
+        .pause => {
+            if (game_API.getButton(&controller.buttons, .pause).ended_down) {
+                game_state.mode = .gameplay;
+            }
+        },
+    }
+}
+
+fn restartGame(game_state: *GameState, memory: *GameMemory) void {
+    game_state.* = .{
+        .mode = .gameplay,
+        .permanent_arena = .init(memory.permanent_storage[@sizeOf(GameState)..]),
+        .snake = .{
+            .body = .init(&game_state.permanent_arena, GameState.tile_count),
+            .direction = .{},
+            .turn_queue = .init(&game_state.permanent_arena, 3),
+            .eaten_egg = false,
+        },
+        .step_cooldown = 0.0,
+        .egg = undefined,
+    };
+
+    const rand = memory.rand;
+    switch (rand.uintLessThanBiased(u4, 4)) {
+        0 => game_state.snake.direction = .{ .x = 1.0, .y = 0 },
+        1 => game_state.snake.direction = .{ .x = 0.0, .y = 1.0 },
+        2 => game_state.snake.direction = .{ .x = -1.0, .y = 0.0 },
+        3 => game_state.snake.direction = .{ .x = 0.0, .y = -1.0 },
+        else => unreachable,
     }
 
-    stepSnake(
-        snake,
-        game_state.egg,
-        input.delta_time,
-        &game_state.step_cooldown,
-        GameState.step_interval,
-    );
-
-    drawGradient(buffer, game_state.x_offset, game_state.y_offset);
-    game_state.x_offset +%= 1;
-    game_state.y_offset +%= 1;
-
-    if (snake.eaten_egg) {
-        game_state.egg = generateRandomEgg(game_state.rand, &game_state.snake);
-        snake.eaten_egg = false;
+    var snake_tile: Vector2 = .{
+        .x = @floatFromInt(rand.uintLessThanBiased(u8, GameState.tiles_per_width)),
+        .y = @floatFromInt(rand.uintLessThanBiased(u4, GameState.tiles_per_height)),
+    };
+    for (0..Snake.initial_length) |_| {
+        game_state.snake.body.enqueue(snake_tile);
+        snake_tile = .add(snake_tile, game_state.snake.direction);
+        snake_tile = .{
+            .x = @mod(snake_tile.x, GameState.tiles_per_width),
+            .y = @mod(snake_tile.y, GameState.tiles_per_height),
+        };
     }
 
-    { // Draw egg
-        const tile_side_pixels = GameState.tile_side_pixels;
-        const egg_upper_left: Vector2 = tilemapSpaceToScreenSpace(game_state.egg);
-        const egg_lower_right: Vector2 = .addScalar(egg_upper_left, tile_side_pixels);
-        drawRectangle(buffer, egg_upper_left, egg_lower_right, 0.7, 0.5, 0.3);
-    }
-
-    drawSnake(
-        buffer,
-        snake,
-        game_state.step_cooldown,
-    );
+    game_state.egg = generateRandomEgg(rand, &game_state.snake);
 }
 
 fn generateRandomEgg(rand: std.Random, snake: *Snake) Vector2 {
     var result: Vector2 = .{
-        .x = @floatFromInt(rand.uintLessThan(u8, GameState.tiles_per_width)),
-        .y = @floatFromInt(rand.uintLessThan(u4, GameState.tiles_per_height)),
+        .x = @floatFromInt(rand.uintLessThanBiased(u8, GameState.tiles_per_width)),
+        .y = @floatFromInt(rand.uintLessThanBiased(u4, GameState.tiles_per_height)),
     };
     while (isTileOccupiedBySnake(result, snake)) {
         result = .{
-            .x = @floatFromInt(rand.uintLessThan(u8, GameState.tiles_per_width)),
-            .y = @floatFromInt(rand.uintLessThan(u4, GameState.tiles_per_height)),
+            .x = @floatFromInt(rand.uintLessThanBiased(u8, GameState.tiles_per_width)),
+            .y = @floatFromInt(rand.uintLessThanBiased(u4, GameState.tiles_per_height)),
         };
     }
     return result;
@@ -156,12 +199,16 @@ fn isTileOccupiedBySnake(tile: Vector2, snake: *Snake) bool {
     var occupied = false;
     var it = snake.body.iterator();
     while (it.next()) |snake_tile| {
-        if (tile.x == snake_tile.x and tile.y == snake_tile.y) {
+        if (isSameTile(tile, snake_tile)) {
             occupied = true;
             break;
         }
     }
     return occupied;
+}
+
+fn isSameTile(a: Vector2, b: Vector2) bool {
+    return (a.x == b.x and a.y == b.y);
 }
 
 fn tilemapToWorldSpace(v: Vector2) Vector2 {
@@ -209,7 +256,10 @@ fn drawSnake(
         tile_side_pixels,
     );
 
-    drawRectangle(buffer, head_upper_left, head_lower_right, 0.0, 0.7, 0.4);
+    const r = 45.0 / 255.0;
+    const g = 216.0 / 255.0;
+    const b = 125.0 / 255.0;
+    drawRectangle(buffer, head_upper_left, head_lower_right, r, g, b);
 
     const tail_tile = snake.body.get(0);
     const next_tail_tile = snake.body.get(1);
@@ -227,50 +277,56 @@ fn drawSnake(
 
     const tail_lower_right: Vector2 = .addScalar(tail_upper_left, tile_side_pixels);
 
-    drawRectangle(buffer, tail_upper_left, tail_lower_right, 0.0, 0.7, 0.4);
+    drawRectangle(buffer, tail_upper_left, tail_lower_right, r, g, b);
 
     // Draw tiles occupied by the snake except head and tail
     for (1..snake.body.size - 1) |i| {
         const tile = snake.body.get(i);
         const tile_upper_left: Vector2 = tilemapSpaceToScreenSpace(tile);
         const tile_lower_right: Vector2 = .addScalar(tile_upper_left, tile_side_pixels);
-        drawRectangle(buffer, tile_upper_left, tile_lower_right, 0.0, 0.7, 0.4);
+        drawRectangle(buffer, tile_upper_left, tile_lower_right, r, g, b);
     }
 }
 
 fn stepSnake(
     snake: *Snake,
     egg: Vector2,
+    game_mode: *GameState.Mode,
     dt: f32,
     step_cooldown: *f32,
-    step_interval: f32,
 ) void {
     step_cooldown.* -= dt;
     if (step_cooldown.* <= 0.0) {
-        while (!snake.turn_queue.isEmpty()) {
+        if (!snake.turn_queue.isEmpty()) {
             const new_direction = snake.turn_queue.dequeue();
             if (Vector2.dot(snake.direction, new_direction) == 0.0) {
                 snake.direction = new_direction;
-                break;
             }
         }
 
         const current_head: Vector2 = snake.body.get(snake.body.size - 1);
-        var next_head: Vector2 = .add(
-            current_head,
-            snake.direction,
-        );
+        var next_head: Vector2 = .add(current_head, snake.direction);
         next_head = .{
             .x = @mod(next_head.x, GameState.tiles_per_width),
             .y = @mod(next_head.y, GameState.tiles_per_height),
         };
-        if (current_head.x == egg.x and current_head.y == egg.y) {
+
+        // Check if snake collided with itself ignoring tail
+        for (1..snake.body.size - 1) |i| {
+            const snake_tile = snake.body.get(i);
+            if (isSameTile(snake_tile, current_head)) {
+                game_mode.* = .game_over;
+            }
+        }
+
+        if (isSameTile(current_head, egg)) {
             snake.eaten_egg = true;
         } else {
             _ = snake.body.dequeue();
         }
+
         snake.body.enqueue(next_head);
-        step_cooldown.* = step_interval;
+        step_cooldown.* = GameState.step_interval;
     }
 }
 
@@ -296,7 +352,8 @@ fn drawRectangle(
     const red   = @as(u32, @intFromFloat(@round(r * 255.0))) << 16;
     const green = @as(u16, @intFromFloat(@round(g * 255.0))) <<  8;
     const blue  = @as(u8,  @intFromFloat(@round(b * 255.0))) <<  0;
-    const color: u32 = red | green | blue;
+    const alpha = 255 << 24;
+    const color: u32 = alpha | red | green | blue;
     // zig fmt: on
 
     const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory));
@@ -311,6 +368,68 @@ fn drawRectangle(
     }
 }
 
+fn drawChekeredPattern(buffer: *const GameOffscreenBuffer, dims: u32) void {
+    const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory));
+    const height: usize = @intCast(buffer.height);
+    const width: usize = @intCast(buffer.width);
+    const white = 0xff_ff_ff_ff;
+    const black = 0x00_00_00_00;
+    var color: u32 = undefined;
+    for (0..height) |row| {
+        for (0..width) |column| {
+            color = if (((column / dims) + (row / dims)) % 2 == 0) white else black;
+            pixels[row * width + column] = color;
+        }
+    }
+}
+
+fn drawChekeredPattern2(buffer: *const GameOffscreenBuffer) void {
+    var isBlue = true;
+    var r: f32 = undefined;
+    var g: f32 = undefined;
+    var b: f32 = undefined;
+    const tile_side_pixels = GameState.tile_side_pixels;
+    var i: u32 = 0;
+    var j: u32 = undefined;
+    while (i < buffer.height) : (i += tile_side_pixels) {
+        j = 0;
+        while (j < buffer.width) : (j += tile_side_pixels) {
+            if (isBlue) {
+                r = 125.0 / 255.0;
+                g = 242.0 / 255.0;
+                b = g;
+            } else {
+                r = 140.0 / 255.0;
+                g = 135.0 / 255.0;
+                b = 186.0 / 255.0;
+            }
+
+            const tile_upper_left: Vector2 = .{
+                .x = @floatFromInt(j),
+                .y = @floatFromInt(i),
+            };
+            const tile_lower_right: Vector2 = .addScalar(tile_upper_left, tile_side_pixels);
+            drawRectangle(buffer, tile_upper_left, tile_lower_right, r, g, b);
+            isBlue = !isBlue;
+        }
+        isBlue = !isBlue;
+    }
+}
+
+fn drawColour(buffer: *const GameOffscreenBuffer, r: f32, g: f32, b: f32) void {
+    const red: u24 = @as(u24, @intFromFloat(@round(r * 255.0))) << 16;
+    const green: u16 = @as(u16, @intFromFloat(@round(g * 255.0))) << 8;
+    const blue: u8 = @intFromFloat(@round(b * 255.0));
+    const alpha: u32 = 255 << 24;
+    const colour: u32 = alpha | red | green | blue;
+
+    var pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory));
+    const pixel_count: usize = @intCast(buffer.width * buffer.height);
+    for (0..pixel_count) |i| {
+        pixels[i] = colour;
+    }
+}
+
 fn drawGradient(buffer: *const GameOffscreenBuffer, x_offset: u8, y_offset: u8) void {
     const pixels: [*]u32 = @ptrCast(@alignCast(buffer.memory));
     const height: usize = @intCast(buffer.height);
@@ -320,7 +439,8 @@ fn drawGradient(buffer: *const GameOffscreenBuffer, x_offset: u8, y_offset: u8) 
             const blue: u8 = @truncate((column +% x_offset) << 0);
             const green: u16 = @truncate((0) << 8);
             const red: u32 = @truncate((row +% y_offset) << 16);
-            pixels[row * width + column] = red | green | blue;
+            const alpha: u32 = 255 << 24;
+            pixels[row * width + column] = alpha | red | green | blue;
         }
     }
 }
